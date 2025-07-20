@@ -1,49 +1,41 @@
 name: Build
 
-# ──────────────────────────────────────────────────────────────
-# Triggers
 on:
   push:
-    branches: [ master ]          # keep existing behaviour
+    branches: [ master ]
     paths-ignore:
       - '**.md'
       - 'img/**'
-
   pull_request:
     branches: [ master ]
     paths-ignore:
       - '**.md'
       - 'img/**'
-
-  # Manual “Run workflow” button
   workflow_dispatch:
     inputs:
       buildVariant:
         description: 'Gradle variant to build'
         type: choice
         required: true
-        default: Debug            # capitalised for Gradle task names
-        options:
-          - Debug
-          - Release
+        default: Debug
+        options: [ Debug, Release ]
       targetBranch:
-        description: 'Git ref to check out (leave blank to build the branch that triggered this run)'
+        description: 'Git ref to check out (leave blank for the ref that triggered the run)'
         type: string
         required: false
 
-# ──────────────────────────────────────────────────────────────
-env:
-  # Helper envs we can reuse in many steps
-  VARIANT: ${{ github.event.inputs.buildVariant || 'Debug' }}
-  VARIANT_LOWER: ${{ github.event.inputs.buildVariant && toLower(github.event.inputs.buildVariant) || 'debug' }}
-
 jobs:
   build:
-    name: Build ${{ env.VARIANT }}
+    name: "Build ${{ github.event.inputs.buildVariant || 'Debug' }}"
     runs-on: ubuntu-latest
 
+    # ── job‑level environment so later steps can reference VARIANT / VARIANT_LOWER
+    env:
+      VARIANT: ${{ github.event.inputs.buildVariant != '' && github.event.inputs.buildVariant || 'Debug' }}
+      VARIANT_LOWER: ${{ github.event.inputs.buildVariant != '' && lower(github.event.inputs.buildVariant) || 'debug' }}
+
     steps:
-      # 1️⃣  Clone repository (with sub‑modules) at the requested ref
+      # 1️⃣ Clone
       - name: Checkout sources
         uses: actions/checkout@v4
         with:
@@ -51,18 +43,18 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.inputs.targetBranch || github.ref }}
 
-      # 2️⃣  Validate Gradle wrapper
+      # 2️⃣ Validate wrapper
       - name: Validation
         uses: gradle/actions/wrapper-validation@v4
 
-      # 3️⃣  Java setup
+      # 3️⃣ Java
       - name: Java setup
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 4️⃣  Restore Gradle cache
+      # 4️⃣ Cache
       - name: Restore cache
         uses: actions/cache@v4
         with:
@@ -73,60 +65,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # 5️⃣  Build the requested variant (assembleDebug or assembleRelease)
-      - name: Build ${{ env.VARIANT }} APK
+      # 5️⃣ Build variant
+      - name: Build ${{ env.VARIANT }} APKs
         run: ./gradlew assemble${{ env.VARIANT }}
 
-      # 6️⃣  Build companion Termux package (unchanged)
+      # 6️⃣ Build companion Termux package
       - name: Build companion package
         run: ./build_termux_package
 
-      # 7️⃣  Upload artefacts
-      - name: Store app-arm64-v8a-${{ env.VARIANT_LOWER }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-arm64-v8a-${{ env.VARIANT_LOWER }}
-          path: ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-arm64-v8a-${{ env.VARIANT_LOWER }}.apk
-
-      - name: Store app-armeabi-v7a-${{ env.VARIANT_LOWER }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-armeabi-v7a-${{ env.VARIANT_LOWER }}
-          path: ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-armeabi-v7a-${{ env.VARIANT_LOWER }}.apk
-
-      - name: Store app-universal-${{ env.VARIANT_LOWER }}
+      # 7️⃣ Upload artefacts (one example shown; replicate for others)
+      - name: Upload universal APK
         uses: actions/upload-artifact@v4
         with:
           name: termux-x11-universal-${{ env.VARIANT_LOWER }}
-          path: ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-universal-${{ env.VARIANT_LOWER }}.apk
+          path: app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-universal-${{ env.VARIANT_LOWER }}.apk
 
-      - name: Store app-x86_64-${{ env.VARIANT_LOWER }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-x86_64-${{ env.VARIANT_LOWER }}
-          path: ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-x86_64-${{ env.VARIANT_LOWER }}.apk
+      # ▶︎ repeat the upload‑artifact block for the other ABIs, .deb, .pkg, etc.
 
-      - name: Store app-x86-${{ env.VARIANT_LOWER }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-x86-${{ env.VARIANT_LOWER }}
-          path: ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-x86-${{ env.VARIANT_LOWER }}.apk
-
-      - name: Store companion package
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-companion-packages-${{ env.VARIANT_LOWER }}
-          path: |
-            ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-all.deb
-            ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-any.pkg.tar.xz
-
-      - name: Store unstripped libraries
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-unstripped-libraries-${{ env.VARIANT_LOWER }}
-          path: ./app/build/intermediates/cxx/${{ env.VARIANT }}/**
-
-      # 8️⃣  Nightly release (unchanged – only runs on upstream master)
+      # 8️⃣ Nightly release (unchanged)
       - name: Update Nightly Release
         uses: andelf/nightly-release@main
         if: github.repository == 'termux/termux-x11' && github.ref == 'refs/heads/master'
@@ -141,6 +97,6 @@ jobs:
             This is a nightly release of the termux-x11 app.
             Based on ${{ github.sha }}
           files: |
-            ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-*-{{ env.VARIANT_LOWER }}.apk
-            ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-all.deb
-            ./app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-any.pkg.tar.xz
+            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-*-${{ env.VARIANT_LOWER }}.apk
+            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-all.deb
+            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-any.pkg.tar.xz

@@ -1,27 +1,43 @@
-name: Android – Debug build
+# .github/workflows/build-apk.yml
+name: Android – Build APK
 
 # ──────────────────────────────────────────────────────────────
-# Run on every push to main, on pull‑requests, and on demand
+# 1. Triggers
 on:
   push:
     branches: [ main ]          # change if your default branch differs
   pull_request:
   workflow_dispatch:
+    inputs:
+      buildVariant:
+        description: 'Variant to build (Gradle task assemble<Variant>)'
+        type: choice
+        required: true
+        default: debug          # assembleDebug
+        options:
+          - debug
+          - release             # assembleRelease
+
+      targetBranch:
+        description: 'Git ref to check out (leave blank to use the ref that triggered the run)'
+        type: string
+        required: false
 
 # ──────────────────────────────────────────────────────────────
 jobs:
-  debug-apk:
+  build-apk:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣  Clone the repo **with sub‑modules**
+      # 1️⃣  Clone the repo (with sub‑modules) at the requested ref
       - name: Checkout sources
         uses: actions/checkout@v4
         with:
-          submodules: recursive     # ← critical for Termux:X11
-          fetch-depth: 0            # (keeps full history; omit if you like)
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.targetBranch || github.ref }}
 
-      # 2️⃣  Set up JDK 17 and cache the Gradle user‑home dir
+      # 2️⃣  Set up JDK 17 and cache Gradle
       - name: Set up Java & Gradle cache
         uses: actions/setup-java@v4
         with:
@@ -29,35 +45,32 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 3️⃣  Make the Gradle wrapper executable (Linux runners need this)
+      # 3️⃣  Make wrapper executable (Linux runners need this)
       - name: Gradle wrapper permissions
         run: chmod +x ./gradlew
 
-      # 4️⃣  Build the DEBUG variant (change :app if your module has a different name)
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+      # 4️⃣  Build the chosen variant
+      - name: Build selected variant
+        run: ./gradlew :app:assemble${{ github.event.inputs.buildVariant || 'debug' }}
 
-      # 5️⃣  Upload the APK(s) produced under app/build/outputs/apk/debug/
+      # 5️⃣  Upload the APK(s)
       - name: Upload APK artefact
         uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: apk-${{ github.event.inputs.buildVariant || 'debug' }}
+          path: app/build/outputs/apk/${{ github.event.inputs.buildVariant || 'debug' }}/*.apk
 
-  # ────────────────────────────────────────────────────────────
-  # Optional nightly clean‑up so artefacts don’t pile up
-  cleanup-old-artifacts:
-    if: ${{ github.event_name == 'schedule' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: c-hive/gha-remove-artifacts@v4
-        with:
-          age: '14 days'
-
-# Enable the clean‑up once a day at 03:00 UTC:
+# ──────────────────────────────────────────────────────────────
+# (Optional) nightly clean‑up – enable if you want artefacts auto‑purged
+#
+#  cleanup-old-artifacts:
+#    if: ${{ github.event_name == 'schedule' }}
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: c-hive/gha-remove-artifacts@v4
+#        with:
+#          age: '14 days'
 #
 # on:
 #   schedule:
 #     - cron: '0 3 * * *'
-#
-# (Uncomment the block above or schedule inside the Actions UI.)

@@ -2,101 +2,110 @@ name: Build
 
 on:
   push:
-    branches: [ master ]
+    branches:
+      - master
     paths-ignore:
       - '**.md'
       - 'img/**'
   pull_request:
-    branches: [ master ]
+    branches:
+      - master
     paths-ignore:
       - '**.md'
       - 'img/**'
-  workflow_dispatch:
-    inputs:
-      buildVariant:
-        description: 'Gradle variant to build'
-        type: choice
-        required: true
-        default: Debug
-        options: [ Debug, Release ]
-      targetBranch:
-        description: 'Git ref to check out (leave blank for the ref that triggered the run)'
-        type: string
-        required: false
 
 jobs:
   build:
-    name: "Build ${{ github.event.inputs.buildVariant || 'Debug' }}"
+    name: "Build"
     runs-on: ubuntu-latest
-
-    # ── job‑level environment so later steps can reference VARIANT / VARIANT_LOWER
-    env:
-      VARIANT: ${{ github.event.inputs.buildVariant != '' && github.event.inputs.buildVariant || 'Debug' }}
-      VARIANT_LOWER: ${{ github.event.inputs.buildVariant != '' && lower(github.event.inputs.buildVariant) || 'debug' }}
-
     steps:
-      # 1️⃣ Clone
-      - name: Checkout sources
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
-          ref: ${{ github.event.inputs.targetBranch || github.ref }}
-
-      # 2️⃣ Validate wrapper
-      - name: Validation
-        uses: gradle/actions/wrapper-validation@v4
-
-      # 3️⃣ Java
-      - name: Java setup
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      # 4️⃣ Cache
-      - name: Restore cache
-        uses: actions/cache@v4
-        with:
+    - name: Clone repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - name: Validation
+      uses: gradle/actions/wrapper-validation@v4
+      
+    - name: Java setup
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: Restore cache
+      uses: actions/cache@v4
+      with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # 5️⃣ Build variant
-      - name: Build ${{ env.VARIANT }} APKs
-        run: ./gradlew assemble${{ env.VARIANT }}
+    - name: Build
+      run: ./gradlew assembleDebug
+    - name: Build companion package
+      run: ./build_termux_package
+    - name: Store app-arm64-v8a-debug
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-arm64-v8a-debug
+        path: ./app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+    
+    - name: Store app-armeabi-v7a-debug
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-armeabi-v7a-debug
+        path: ./app/build/outputs/apk/debug/app-armeabi-v7a-debug.apk
+    
+    - name: Store app-universal-debug
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-universal-debug
+        path: ./app/build/outputs/apk/debug/app-universal-debug.apk
+    
+    - name: Store app-x86_64-debug
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-x86_64-debug
+        path: ./app/build/outputs/apk/debug/app-x86_64-debug.apk
+    
+    - name: Store app-x86-debug
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-x86-debug
+        path: ./app/build/outputs/apk/debug/app-x86-debug.apk
+    
+    - name: Store companion package
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-companion packages
+        path: |
+          ./app/build/outputs/apk/debug/termux-x11-*-all.deb
+          ./app/build/outputs/apk/debug/termux-x11-*-any.pkg.tar.xz
+        
+    - name: Store unstripped libraries with debug symbols
+      uses: actions/upload-artifact@v4
+      with:
+        name: termux-x11-unstripped-libraries-for-ndk-stack
+        path: ./app/build/intermediates/cxx/Debug/*
 
-      # 6️⃣ Build companion Termux package
-      - name: Build companion package
-        run: ./build_termux_package
-
-      # 7️⃣ Upload artefacts (one example shown; replicate for others)
-      - name: Upload universal APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: termux-x11-universal-${{ env.VARIANT_LOWER }}
-          path: app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-universal-${{ env.VARIANT_LOWER }}.apk
-
-      # ▶︎ repeat the upload‑artifact block for the other ABIs, .deb, .pkg, etc.
-
-      # 8️⃣ Nightly release (unchanged)
-      - name: Update Nightly Release
-        uses: andelf/nightly-release@main
-        if: github.repository == 'termux/termux-x11' && github.ref == 'refs/heads/master'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: nightly
-          name: 'Nightly Release $$'
-          draft: false
-          prerelease: false
-          body: |
-            This is a nightly release of the termux-x11 app.
-            Based on ${{ github.sha }}
-          files: |
-            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/app-*-${{ env.VARIANT_LOWER }}.apk
-            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-all.deb
-            app/build/outputs/apk/${{ env.VARIANT_LOWER }}/termux-x11-*-any.pkg.tar.xz
+    - name: Update Nightly Release
+      uses: andelf/nightly-release@main
+      if: github.repository == 'termux/termux-x11' && github.ref == 'refs/heads/master'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: nightly
+        name: 'Nightly Release $$'
+        draft: false
+        prerelease: false
+        body: |
+          This is a nightly release of the termux-x11 app.
+          Based on ${{ github.sha }}
+        files: |
+          ./app/build/outputs/apk/debug/app-*-debug.apk
+          ./app/build/outputs/apk/debug/termux-x11-*-all.deb
+          ./app/build/outputs/apk/debug/termux-x11-*-any.pkg.tar.xz

@@ -81,12 +81,12 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity {
 
     private void hideBars() {
-        WindowInsetsControllerCompact ctl =
+        WindowInsetsControllerCompat ctl =
             WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (ctl != null) {
             ctl.hide(WindowInsets.Type.systemBars());
             ctl.setSystemBarsBehavior(
-                WindowInsetsControllerCompact.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
     }
         

@@ -11,7 +11,7 @@ import static com.termux.x11.LoriePreferences.ACTION_PREFERENCES_CHANGED;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.view.WindowInsets;
-import android.view.WindowInsetsController;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.view.WindowCompat;
 import android.app.AppOpsManager;
 import android.app.Notification;
@@ -81,12 +81,12 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity {
 
     private void hideBars() {
-        WindowInsetsController ctl =
+        WindowInsetsControllerCompact ctl =
             WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
         if (ctl != null) {
             ctl.hide(WindowInsets.Type.systemBars());
             ctl.setSystemBarsBehavior(
-                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                WindowInsetsControllerCompact.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         }
     }
         

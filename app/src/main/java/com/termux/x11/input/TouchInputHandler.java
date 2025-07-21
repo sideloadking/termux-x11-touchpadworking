@@ -342,8 +342,8 @@ public class TouchInputHandler {
                     float scrollX = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
 
                     if (scrollY == 0 && scrollX == 0) {
-                        scrollY = -event.getAxisValue(MotionEvent.AXIS_RELATIVE_VSCROLL);
-                        scrollX = -event.getAxisValue(MotionEvent.AXIS_RELATIVE_HSCROLL);
+                        scrollY = -event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                        scrollX = -event.getAxisValue(MotionEvent.AXIS_HSCROLL);
                     }
 
                     scrollY *= -100;
@@ -866,8 +866,8 @@ public class TouchInputHandler {
                 float scrollX = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
 
                 if (scrollY == 0 && scrollX == 0) {
-                    scrollY = -e.getAxisValue(MotionEvent.AXIS_RELATIVE_VSCROLL);
-                    scrollX = -e.getAxisValue(MotionEvent.AXIS_RELATIVE_HSCROLL);
+                    scrollY = -e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                    scrollX = -e.getAxisValue(MotionEvent.AXIS_HSCROLL);
                 }
                 
                 scrollY *= -100;

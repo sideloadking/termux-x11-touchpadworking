@@ -1,23 +1,24 @@
+// Path: app/src/main/java/com/termux/x11/input/TouchInputHandler.java
 // Copyright 2013 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package com.termux.x11.input;
 
-import static android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC;
-import static android.view.KeyEvent.KEYCODE_BACK;
-import static android.view.KeyEvent.KEYCODE_VOLUME_DOWN;
-import static android.view.KeyEvent.KEYCODE_VOLUME_UP;
+import static android.view.KeyEvent.*;
+import static android.view.WindowManager.LayoutParams.*;
+import static com.termux.x11.MainActivity.toggleKeyboardVisibility;
 
 import android.annotation.SuppressLint;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.PointF;
+import android.content.res.Configuration;
 import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
-import android.os.Handler;
 import android.os.Build;
+import android.os.Handler;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.GestureDetector;
@@ -26,15 +27,18 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.widget.LinearLayout;
 
 import androidx.annotation.IntDef;
 import androidx.core.app.NotificationCompat;
 import androidx.core.math.MathUtils;
+import androidx.viewpager.widget.ViewPager;
 
 import com.termux.x11.LoriePreferences;
 import com.termux.x11.LorieView;
 import com.termux.x11.MainActivity;
 import com.termux.x11.Prefs;
+import com.termux.x11.R;
 import com.termux.x11.utils.SamsungDexUtils;
 
 import java.lang.annotation.Retention;
@@ -591,7 +595,7 @@ public class TouchInputHandler {
     }
 
     /** Responds to touch events filtered by the gesture detectors.
-     * @noinspection NullableProblems */
+     * @noinspection NullableProblems*/
     private class GestureListener extends GestureDetector.SimpleOnGestureListener
             implements TapGestureDetector.OnTapListener {
         private final Handler mGestureListenerHandler = new Handler(msg -> {
@@ -631,6 +635,19 @@ public class TouchInputHandler {
             }
 
 
+            // START MODIFICATION
+            boolean isTrackpadScroll = false;
+            if ((e2.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
+                // On Android Q+, CLASSIFICATION_TWO_FINGER_SWIPE is used for touchpad scrolling.
+                // On some devices, these events are dispatched with pointerCount=1,
+                // so we check the classification directly instead of relying on pointer count.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    e2.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE) {
+                    isTrackpadScroll = true;
+                }
+            }
+            // END MODIFICATION
+
             if (pointerCount >= 3 && !mSwipeCompleted) {
                 // Note that distance values are reversed. For example, dragging a finger in the
                 // direction of increasing Y coordinate (downwards) results in distanceY being
@@ -639,7 +656,8 @@ public class TouchInputHandler {
                 return onSwipe();
             }
 
-            if (pointerCount == 2 && mSwipePinchDetector.isSwiping()) {
+            // MODIFIED CONDITION
+            if (isTrackpadScroll || (pointerCount == 2 && mSwipePinchDetector.isSwiping())) {
                 if (!(mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy)) {
                     // Ensure the cursor is located at the coordinates of the original event,
                     // otherwise the target window may not receive the scroll event correctly.
@@ -843,6 +861,9 @@ public class TouchInputHandler {
     private class HardwareMouseListener {
         private int savedBS = 0;
         private int currentBS = 0;
+        // START MODIFICATION
+        private float lastX, lastY;
+        // END MODIFICATION
 
         boolean isMouseButtonChanged(int mask) {
             return (savedBS & mask) != (currentBS & mask);
@@ -869,10 +890,10 @@ public class TouchInputHandler {
                     scrollY = -e.getAxisValue(MotionEvent.AXIS_VSCROLL);
                     scrollX = -e.getAxisValue(MotionEvent.AXIS_HSCROLL);
                 }
-                
+
                 scrollY *= -100;
                 scrollX *= -100;
-            
+
 
                 mInjector.sendMouseWheelEvent(scrollX, scrollY);
                 return true;
@@ -885,30 +906,52 @@ public class TouchInputHandler {
             } else if (e.getAction() == MotionEvent.ACTION_MOVE && e.getPointerCount() == 1) {
                 boolean axis_relative_x = e.getDevice().getMotionRange(MotionEvent.AXIS_RELATIVE_X) != null;
                 boolean mouse_relative = (e.getSource() & InputDevice.SOURCE_MOUSE_RELATIVE) == InputDevice.SOURCE_MOUSE_RELATIVE;
+                float x, y;
+
                 if (axis_relative_x || mouse_relative) {
-                    float x = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_X) : e.getX();
-                    float y = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y) : e.getY();
-                    float temp;
-
-                    switch (capturedPointerTransformation) {
-                        case CapturedPointerTransformation.CLOCKWISE:
-                            temp = x; x = -y; y = temp; break;
-                        case CapturedPointerTransformation.COUNTER_CLOCKWISE:
-                            temp = x; x = y; y = -temp; break;
-                        case CapturedPointerTransformation.UPSIDE_DOWN:
-                            x = -x; y = -y; break;
-                        default:
-                            break;
-                    }
-
-                    x *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
-                    y *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
-
-                    mInjector.sendCursorMove(x, y, true);
-                    if (axis_relative_x && mTouchpadHandler != null)
-                        mTouchpadHandler.mTapDetector.onTouchEvent(e);
+                    x = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_X) : e.getX();
+                    y = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y) : e.getY();
+                } else {
+                    // START MODIFICATION: Add this else block to handle devices that don't
+                    // Calculate relative motion from absolute coordinates
+                    float deltaX = e.getX() - lastX;
+                    float deltaY = e.getY() - lastY;
+                    x = deltaX;
+                    y = deltaY;
                 }
+
+                // Store the current position for the next event
+                lastX = e.getX();
+                lastY = e.getY();
+                // END MODIFICATION
+
+                float temp;
+
+                switch (capturedPointerTransformation) {
+                    case CapturedPointerTransformation.CLOCKWISE:
+                        temp = x; x = -y; y = temp; break;
+                    case CapturedPointerTransformation.COUNTER_CLOCKWISE:
+                        temp = x; x = y; y = -temp; break;
+                    case CapturedPointerTransformation.UPSIDE_DOWN:
+                        x = -x; y = -y; break;
+                    default:
+                        break;
+                }
+
+                x *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
+                y *= mInjector.capturedPointerSpeedFactor * mMetrics.density;
+
+                mInjector.sendCursorMove(x, y, true);
+                if (axis_relative_x && mTouchpadHandler != null)
+                    mTouchpadHandler.mTapDetector.onTouchEvent(e);
             }
+            // START MODIFICATION
+            else if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                // Initialize last coordinates on the first touch event in captured mode
+                lastX = e.getX();
+                lastY = e.getY();
+            }
+            // END MODIFICATION
 
             currentBS = e.getButtonState();
             for (int[] button: buttons)

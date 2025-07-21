@@ -5,6 +5,7 @@
 
 package com.termux.x11.input;
 
+import static android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC;
 import static android.view.KeyEvent.*;
 import static android.view.WindowManager.LayoutParams.*;
 import static com.termux.x11.MainActivity.toggleKeyboardVisibility;
@@ -14,6 +15,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
+import android.graphics.PointF;
 import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
 import android.os.Build;

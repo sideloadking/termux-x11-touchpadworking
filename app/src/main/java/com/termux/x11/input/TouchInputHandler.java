@@ -8,7 +8,6 @@ package com.termux.x11.input;
 import static android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC;
 import static android.view.KeyEvent.*;
 import static android.view.WindowManager.LayoutParams.*;
-import static com.termux.x11.MainActivity.toggleKeyboardVisibility;
 
 import android.annotation.SuppressLint;
 import android.app.PendingIntent;
@@ -172,6 +171,14 @@ public class TouchInputHandler {
         return ((currentBS & mask) != 0);
     }
 
+    // START MODIFICATION: Variables to track pointer capture and scrolling state
+    private float mLastCapturedX;
+    private float mLastCapturedY;
+    private float mLastScrollX;
+    private float mLastScrollY;
+    private boolean mIsTrackpadScroll;
+    // END MODIFICATION
+
     private TouchInputHandler(MainActivity activity, RenderData renderData,
                               final InputEventSender injector, boolean isTouchpad) {
         if (injector == null)
@@ -188,23 +195,13 @@ public class TouchInputHandler {
 
         GestureListener listener = new GestureListener();
         mScroller = new GestureDetector(/*desktop*/ activity, listener, null, false);
-
-        // If long-press is enabled, the gesture-detector will not emit any further onScroll
-        // notifications after the onLongPress notification. Since onScroll is being used for
-        // moving the cursor, it means that the cursor would become stuck if the finger were held
-        // down too long.
         mScroller.setIsLongpressEnabled(false);
 
         mTapDetector = new TapGestureDetector(/*desktop*/ activity, listener);
         mSwipePinchDetector = new SwipeDetector(/*desktop*/ activity);
 
-        // The threshold needs to be bigger than the ScaledTouchSlop used by the gesture-detectors,
-        // so that a gesture cannot be both a tap and a swipe. It also needs to be small enough so
-        // that intentional swipes are usually detected.
         float density = /*desktop*/ activity.getResources().getDisplayMetrics().density;
         mSwipeThreshold = 40 * density;
-
-//        mEdgeSlopInPx = ViewConfiguration.get(/*desktop*/ ctx).getScaledEdgeSlop();
 
         setInputMode(InputMode.TRACKPAD);
         mDexListener = new DexListener(activity);
@@ -214,23 +211,16 @@ public class TouchInputHandler {
         ((InputManager) mActivity.getSystemService(Context.INPUT_SERVICE)).registerInputDeviceListener(new InputManager.InputDeviceListener() {
             @Override
             public void onInputDeviceAdded(int deviceId) {
-                InputDevice dev = InputDevice.getDevice(deviceId);
-                String name = dev != null ? dev.getName() : "null";
-                android.util.Log.d("InputDeviceListener", "added " + name);
                 refreshInputDevices();
             }
 
             @Override
             public void onInputDeviceRemoved(int deviceId) {
-                android.util.Log.d("InputDeviceListener", "device removed");
                 refreshInputDevices();
             }
 
             @Override
             public void onInputDeviceChanged(int deviceId) {
-                InputDevice dev = InputDevice.getDevice(deviceId);
-                String name = dev != null ? dev.getName() : "null";
-                android.util.Log.d("InputDeviceListener", "changed " + name);
                 refreshInputDevices();
             }
         }, null);
@@ -244,28 +234,39 @@ public class TouchInputHandler {
     static public void refreshInputDevices() {
         AtomicBoolean stylusAvailable = new AtomicBoolean(false);
         AtomicBoolean externalKeyboardAvailable = new AtomicBoolean(false);
-        android.util.Log.d("DEVICES", "external keyboard connected " + stylusAvailable.get());
         Arrays.stream(InputDevice.getDeviceIds())
                 .mapToObj(InputDevice::getDevice)
                 .filter(Objects::nonNull)
                 .forEach((device) -> {
-                    //noinspection DataFlowIssue
-                    android.util.Log.d("DEVICES", "found device \"" + device.getName() + "\" " +
-                            (device.supportsSource(InputDevice.SOURCE_STYLUS) ? ((isExternal(device) ? "external " : "") + "stylus ") : "") +
-                            ((device.supportsSource(InputDevice.SOURCE_KEYBOARD) && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC) ? ((isExternal(device) ? "external " : "") + "keyboard ") : "") +
-                            "sources " + String.format("0x%08X", device.getSources()));
-
                     if (device.supportsSource(InputDevice.SOURCE_STYLUS))
                         stylusAvailable.set(true);
 
                     if (device.supportsSource(InputDevice.SOURCE_KEYBOARD) && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC && isExternal(device))
                         externalKeyboardAvailable.set(true);
                 });
-        android.util.Log.d("DEVICES", "requesting stylus " + stylusAvailable.get());
-        android.util.Log.d("DEVICES", "external keyboard connected " + externalKeyboardAvailable.get());
         LorieView.requestStylusEnabled(stylusAvailable.get());
         MainActivity.getInstance().setExternalKeyboardConnected(externalKeyboardAvailable.get());
     }
+
+    // START MODIFICATION: Add helper for detecting scroll gestures
+    @SuppressLint({"WrongConstant", "InlinedApi"})
+    private static boolean isScrollingEvent(MotionEvent e) {
+        if ((e.getSource() & InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD) {
+            return false;
+        }
+
+        // On older Samsung DeX, two-finger scroll gestures are sent with this flag.
+        if ((e.getFlags() & 0x14000000) != 0) {
+            return true;
+        }
+
+        // On Android 10+ and standard touchpads, this classification is used.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && e.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE) {
+            return true;
+        }
+        return false;
+    }
+    // END MODIFICATION
 
     boolean isDexEvent(MotionEvent event) {
         return ((event.getSource() & InputDevice.SOURCE_MOUSE) ==
@@ -275,6 +276,50 @@ public class TouchInputHandler {
     }
 
     public boolean handleTouchEvent(View view0, View view, MotionEvent event) {
+        // START MODIFICATION: Divert captured pointer events for touchpads immediately
+        if (mInjector.pointerCapture && (event.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    mLastCapturedX = event.getX();
+                    mLastCapturedY = event.getY();
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float deltaX = event.getX() - mLastCapturedX;
+                    float deltaY = event.getY() - mLastCapturedY;
+                    mLastCapturedX = event.getX();
+                    mLastCapturedY = event.getY();
+
+                    int transform = capturedPointerTransformation == CapturedPointerTransformation.AUTO ?
+                            mDisplayRotation : capturedPointerTransformation;
+                    switch (transform) {
+                        case CapturedPointerTransformation.CLOCKWISE:
+                            float temp = deltaX; deltaX = -deltaY; deltaY = temp; break;
+                        case CapturedPointerTransformation.COUNTER_CLOCKWISE:
+                            temp = deltaX; //noinspection SuspiciousNameCombination
+                            deltaX = deltaY; deltaY = -temp; break;
+                        case CapturedPointerTransformation.UPSIDE_DOWN:
+                            deltaX = -deltaX; deltaY = -deltaY; break;
+                    }
+
+                    deltaX *= mInjector.capturedPointerSpeedFactor;
+                    deltaY *= mInjector.capturedPointerSpeedFactor;
+
+                    mInjector.sendCursorMove(deltaX, deltaY, true);
+                    break;
+            }
+
+            // Also handle physical button presses on the touchpad
+            currentBS = event.getButtonState();
+            for (int[] button : buttons) {
+                if (isMouseButtonChanged(button[0])) {
+                    mInjector.sendMouseEvent(null, button[1], mouseButtonDown(button[0]), true);
+                }
+            }
+            savedBS = currentBS;
+            return true;
+        }
+        // END MODIFICATION
+
         // Regular touchpads and Dex touchpad (in captured mode) send events as finger too,
         // but they should be handled as touchscreens with trackpad mode.
         if (mTouchpadHandler != null && ((event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_FINGER &&
@@ -310,32 +355,38 @@ public class TouchInputHandler {
             return mHMListener.onTouch(view, event);
 
         if (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_FINGER) {
-            // Dex touchpad (in non-captured mode) sends events as finger, but it should be considered as a mouse.
             if (isDexEvent(event) && mDexListener.onTouch(view, event))
                 return true;
 
-            // Give the underlying input strategy a chance to observe the current motion event before
-            // passing it to the gesture detectors.  This allows the input strategy to react to the
-            // event or save the payload for use in recreating the gesture remotely.
             if (mInputStrategy instanceof InputStrategyInterface.NullInputStrategy)
                 mInjector.sendTouchEvent(event, mRenderData);
             else
                 mInputStrategy.onMotionEvent(event);
 
-            // Avoid short-circuit logic evaluation - ensure all gesture detectors see all events so
-            // that they generate correct notifications.
+            // START MODIFICATION: Direct scroll handling
+            if (isScrollingEvent(event)) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    mLastScrollX = event.getX();
+                    mLastScrollY = event.getY();
+                    mIsTrackpadScroll = true;
+                } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE && mIsTrackpadScroll) {
+                    float deltaX = event.getX() - mLastScrollX;
+                    float deltaY = event.getY() - mLastScrollY;
+                    mLastScrollX = event.getX();
+                    mLastScrollY = event.getY();
+                    mInputStrategy.onScroll(-deltaX, -deltaY);
+                }
+                // Don't pass to other detectors if we handled it as a scroll.
+                return true;
+            } else if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                mIsTrackpadScroll = false;
+            }
+            // END MODIFICATION
+
             mScroller.onTouchEvent(event);
             mTapDetector.onTouchEvent(event);
             mSwipePinchDetector.onTouchEvent(event);
 
-            // For hardware touchpad in DeX (captured mode), handle physical click buttons
-            if ((event.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
-                currentBS = event.getButtonState();
-                for (int[] button: buttons)
-                    if (isMouseButtonChanged(button[0]))
-                        mInjector.sendMouseEvent(null, button[1], mouseButtonDown(button[0]), true);
-                savedBS = currentBS;
-            }
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     mSuppressCursorMovement = false;
@@ -355,7 +406,6 @@ public class TouchInputHandler {
                     scrollY *= -100;
                     scrollX *= -100;
 
-
                     mInjector.sendMouseWheelEvent(scrollX, scrollY);
                     return true;
 
@@ -373,6 +423,7 @@ public class TouchInputHandler {
     }
 
     private void resetTransformation() {
+        if (mRenderData.imageWidth == 0 || mRenderData.imageHeight == 0) return;
         float sx = (float) mRenderData.screenWidth / (float) mRenderData.imageWidth;
         float sy = (float) mRenderData.screenHeight / (float) mRenderData.imageHeight;
         mRenderData.scale.set(sx, sy);
@@ -613,61 +664,16 @@ public class TouchInputHandler {
         public boolean onScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
             int pointerCount = e2.getPointerCount();
 
-            // For captured touchpad pointer:
-            // Automatic (for touchpad) mode is needed because touchpads ignore screen orientation and report physical X and Y
-            if ((e2.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD
-                    && mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) {
-                float temp;
-                int transform = capturedPointerTransformation == CapturedPointerTransformation.AUTO ?
-                        mDisplayRotation : capturedPointerTransformation;
-                switch (transform) {
-                    case CapturedPointerTransformation.CLOCKWISE:
-                        temp = distanceX; distanceX = -distanceY; distanceY = temp; break;
-                    case CapturedPointerTransformation.COUNTER_CLOCKWISE:
-                        temp = distanceX;
-                        // noinspection SuspiciousNameCombination
-                        distanceX = distanceY; distanceY = -temp; break;
-                    case CapturedPointerTransformation.UPSIDE_DOWN:
-                        distanceX = -distanceX; distanceY = -distanceY; break;
-                    default:
-                        break;
-                }
-                distanceX *= mInjector.capturedPointerSpeedFactor;
-                distanceY *= mInjector.capturedPointerSpeedFactor;
-            }
-
-
-            // START MODIFICATION
-            boolean isTrackpadScroll = false;
-            if ((e2.getSource() & InputDevice.SOURCE_TOUCHPAD) == InputDevice.SOURCE_TOUCHPAD) {
-                // On Android Q+, CLASSIFICATION_TWO_FINGER_SWIPE is used for touchpad scrolling.
-                // On some devices, these events are dispatched with pointerCount=1,
-                // so we check the classification directly instead of relying on pointer count.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                    e2.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE) {
-                    isTrackpadScroll = true;
-                }
-            }
-            // END MODIFICATION
-
             if (pointerCount >= 3 && !mSwipeCompleted) {
-                // Note that distance values are reversed. For example, dragging a finger in the
-                // direction of increasing Y coordinate (downwards) results in distanceY being
-                // negative.
                 mTotalMotionY -= distanceY;
                 return onSwipe();
             }
 
-            // MODIFIED CONDITION
-            if (isTrackpadScroll || (pointerCount == 2 && mSwipePinchDetector.isSwiping())) {
+            if (pointerCount == 2 && mSwipePinchDetector.isSwiping()) {
                 if (!(mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy)) {
-                    // Ensure the cursor is located at the coordinates of the original event,
-                    // otherwise the target window may not receive the scroll event correctly.
                     moveCursorToScreenPoint(e1.getX(), e1.getY());
                 }
                 mInputStrategy.onScroll(distanceX, distanceY);
-
-                // Prevent the cursor being moved or flung by the gesture.
                 mSuppressCursorMovement = true;
                 return true;
             }
@@ -683,22 +689,16 @@ public class TouchInputHandler {
                 moveCursorByOffset(distanceX, distanceY);
             }
             if (!(mInputStrategy instanceof InputStrategyInterface.TrackpadInputStrategy) && mIsDragging) {
-                // Ensure the cursor follows the user's finger when the user is dragging under
-                // direct input mode.
                 moveCursorToScreenPoint(e2.getX(), e2.getY());
             }
             return true;
         }
 
-        /** Called whenever a gesture starts. Always accepts the gesture so it isn't ignored. */
         @Override
         public boolean onDown(MotionEvent e) {
             return true;
         }
 
-        /**
-         * Called when the user taps the screen with one or more fingers.
-         */
         @Override
         public void onTap(int pointerCount, float x, float y) {
             int button = mouseButtonFromPointerCount(pointerCount);
@@ -743,7 +743,6 @@ public class TouchInputHandler {
             return true;
         }
 
-        /** Called when a long-press is triggered for one or more fingers. */
         @Override
         public void onLongPress(int pointerCount, float x, float y) {
             int button = mouseButtonFromPointerCount(pointerCount);
@@ -761,7 +760,6 @@ public class TouchInputHandler {
                 mIsDragging = true;
         }
 
-        /** Maps the number of fingers in a tap or long-press gesture to a mouse-button. */
         private int mouseButtonFromPointerCount(int pointerCount) {
             switch (pointerCount) {
                 case 1:
@@ -775,7 +773,6 @@ public class TouchInputHandler {
             }
         }
 
-        /** Determines whether the given screen point lies outside the desktop image. */
         private boolean screenPointLiesOutsideImageBoundary(float screenX, float screenY) {
             float scaledX = screenX * mRenderData.scale.x, scaledY = screenY * mRenderData.scale.y;
 
@@ -786,11 +783,6 @@ public class TouchInputHandler {
         }
     }
 
-    /**
-     * It is a copy of {@link android.view.KeyEvent#isMediaSessionKey} to be used on Android 30 and below.
-     * Returns whether this key will be sent to the
-     * {@link android.media.session.MediaSession.Callback} if not handled.
-     */
     public static boolean isMediaSessionKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_MEDIA_PLAY:

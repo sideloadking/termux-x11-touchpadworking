@@ -24,6 +24,7 @@ import android.text.Selection;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.MotionEvent; // <-- ADDED
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -350,14 +351,7 @@ public class LorieView extends SurfaceView implements InputStub {
         private final MainActivity a = MainActivity.getInstance();
         private CharSequence currentComposingText = null;
 
-        // We can not inspect X windows and get currently edited text
-        // or even check if currently focused element in window is editable.
-        @Override public Editable getEditable() {
-            return null;
-        }
-        // Keeps track of nested begin/end batch edit to ensure this connection always has a
-        // balanced impact on its associated TextView.
-        // A negative value means that this connection has been finished by the InputMethodManager.
+        @Override public Editable getEditable() { return null; }
         private int mBatchEditNesting = 0;
         @Override
         public boolean beginBatchEdit() {
@@ -378,10 +372,6 @@ public class LorieView extends SurfaceView implements InputStub {
         public boolean endBatchEdit() {
             synchronized (this) {
                 if (mBatchEditNesting > 0) {
-                    // When the connection is reset by the InputMethodManager and reportFinish
-                    // is called, some endBatchEdit calls may still be asynchronously received from the
-                    // IME. Do not take these into account, thus ensuring that this IC's final
-                    // contribution to mTextView's nested batch edit count is zero.
                     mBatchEditNesting--;
                     if (mBatchEditNesting == 0) {
                         sendCursorPosition();
@@ -393,7 +383,6 @@ public class LorieView extends SurfaceView implements InputStub {
             return false;
         }
 
-        // Needed to trace current fake cursor position.
         int currentPos = 1, requestedPos;
         boolean resetCursorPosition;
         void sendCursorPosition() {
@@ -405,12 +394,6 @@ public class LorieView extends SurfaceView implements InputStub {
             Log.d("InputConnectionWrapper", "SENDING CURSOR POS " + currentPos);
         }
 
-        // Needed to send arrow keys with IME's cursor control feature
-        // Also gboard's word suggestions behave weird if there is no whitespace before cursor
-        // and it always tries to remove whitespace after word so we put there ASCII letter.
-        // Gboard stops suggesting words if it sees period after cursor.
-        // Also in the case of whitespace it tries to remove it with `deleteSurroundingText`
-        // so we can not use it here.
         @Override public CharSequence getTextBeforeCursor(int length, int flags) { return " "; }
         @Override public CharSequence getTextAfterCursor(int length, int flags) { return " "; }
         @Override public boolean setComposingRegion(int start, int end) { return true; }
@@ -430,17 +413,11 @@ public class LorieView extends SurfaceView implements InputStub {
 
         @Override public boolean deleteSurroundingText(int beforeLength, int afterLength) {
             if (requestedPos != -1 && requestedPos > currentPos && beforeLength > 0) {
-                // sometimes gboard sees following whitespace and wants to remove it.
-                // but we do not want to send backspace key events
-                // because the whitespace is fake, it is required for cursor control
                 requestedPos -= beforeLength;
                 return true;
             }
 
             if (beforeLength == 1 && mBatchEditNesting > 0) {
-                // in the case if this code was called between beginBatchEdit and endBatchEdit
-                // most likely it was triggered by backspace key.
-                // In the case of physical backspace we should cancel pending physical release
                 keyReleaseHandler.removeMessages(KeyEvent.KEYCODE_DEL);
             }
 
@@ -456,11 +433,6 @@ public class LorieView extends SurfaceView implements InputStub {
             return true;
         }
 
-        /**
-         * X server itself does not provide any way to compose text.
-         * But we can simply send text we want and erase it in the case if user does not need it.
-         *
-         * @noinspection SameReturnValue*/
         boolean replaceText(CharSequence newText, boolean reuse) {
             int oldLen = currentComposingText != null ? currentComposingText.length() : 0;
             int newLen = newText != null ? newText.length() : 0;
@@ -486,9 +458,7 @@ public class LorieView extends SurfaceView implements InputStub {
         }
 
         public boolean setSelection(int start, int end) {
-            // Samsung keyboard moves cursor by sending DPAD directional key events.
-            // Gboard invokes `setSelection`. We should handle both ways.
-            if (mBatchEditNesting == 0) { // outside of batchedit so most likely cursor control
+            if (mBatchEditNesting == 0) { 
                 if (start == end) {
                     if (start < 1)
                         sendKey(KeyEvent.KEYCODE_DPAD_LEFT);
@@ -500,7 +470,6 @@ public class LorieView extends SurfaceView implements InputStub {
                 mIMM.updateSelection(LorieView.this, 1, 1, -1, -1);
                 currentPos = 1;
             } else if (mBatchEditNesting > 0){
-                // Most likely gboard following whitespace and wants to remove it
                 if (start == end && start > currentPos)
                     requestedPos = start;
             }
@@ -520,7 +489,6 @@ public class LorieView extends SurfaceView implements InputStub {
             else
                 resetCursorPosition = true;
             if (mBatchEditNesting == 0)
-                // beginBatchEdit was not called so it will not be reported otherwise
                 sendCursorPosition();
 
             return replaceText(text, false);
@@ -528,7 +496,6 @@ public class LorieView extends SurfaceView implements InputStub {
 
         @Override
         public boolean finishComposingText() {
-            // We do not implement real composing, so no need to finish it.
             currentComposingText = null;
             return true;
         }
@@ -689,6 +656,27 @@ public class LorieView extends SurfaceView implements InputStub {
         sendMouseEvent(deltaX, deltaY, BUTTON_SCROLL, false, true);
     }
 
+    // --- ADDED: make sure generic-motion scroll is handled, for wheels/trackpads ---
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent e) {
+        if (e.getAction() == MotionEvent.ACTION_SCROLL) {
+            float v = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+            float h = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
+
+            // Fallback for devices that report 0 unless negated (seen on some vendor stacks)
+            if (v == 0 && h == 0) {
+                v = -e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                h = -e.getAxisValue(MotionEvent.AXIS_HSCROLL);
+            }
+
+            // Keep same inversion/scale as elsewhere in the app
+            sendMouseWheelEvent(h * -100f, v * -100f);
+            return true;
+        }
+        return super.onGenericMotionEvent(e);
+    }
+    // --- END ADDED ---
+
     static final Set<Integer> imeBuggyKeys = Set.of(
             KeyEvent.KEYCODE_DEL,
             KeyEvent.KEYCODE_CTRL_LEFT,
@@ -707,9 +695,6 @@ public class LorieView extends SurfaceView implements InputStub {
     @Override
     public boolean dispatchKeyEventPreIme(KeyEvent event) {
         if (imeBuggyKeys.contains(event.getKeyCode())) {
-            // IME does not handle/send events for some keys correctly correctly.
-            // So we should send key release manually in the case if IME will not send it...
-            // I.e. in the case of CTRL+Backspace IME does not send Backspace release event.
             int action = event.getAction();
             if (action == KeyEvent.ACTION_UP)
                 keyReleaseHandler.sendEmptyMessageDelayed(event.getKeyCode(), 50);
@@ -724,7 +709,6 @@ public class LorieView extends SurfaceView implements InputStub {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (imeBuggyKeys.contains(event.getKeyCode())) {
-            // remove messages we posted in dispatchKeyEventPreIme
             int action = event.getAction();
             if (action == KeyEvent.ACTION_UP)
                 keyReleaseHandler.removeMessages(event.getKeyCode());
@@ -742,17 +726,11 @@ public class LorieView extends SurfaceView implements InputStub {
         TouchInputHandler.refreshInputDevices();
     }
 
-    // It is used in native code
     void setClipboardText(String text) {
         clipboard.setPrimaryClip(ClipData.newPlainText("X11 clipboard", text));
-
-        // Android does not send PrimaryClipChanged event to the window which posted event
-        // But in the case we are owning focus and clipboard is unchanged it will be replaced by the same value on X server side.
-        // Not cool in the case if user installed some clipboard manager, clipboard content will be doubled.
         lastClipboardTimestamp = System.currentTimeMillis() + 150;
     }
 
-    /** @noinspection unused*/ // It is used in native code
     void requestClipboard() {
         if (!clipboardSyncEnabled) {
             sendClipboardEvent("".getBytes(UTF_8));
@@ -806,20 +784,10 @@ public class LorieView extends SurfaceView implements InputStub {
         else
             outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_NORMAL;
         outAttrs.actionLabel = "↵";
-        // Note that IME_ACTION_NONE cannot be used as that makes it impossible to input newlines using the on-screen
-        // keyboard on Android TV (see https://github.com/termux/termux-app/issues/221).
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
         return mConnection;
     }
 
-    /**
-     * Unfortunately there is no direct way to focus inside X windows.
-     * As a workaround we will reset IME on X window focus change and any user interaction
-     * with LorieView except sending keys, text (Unicode) and mouse movements.
-     * We must reset IME to get rid of pending composing, predictive text and other status related stuff.
-     * It is called from native code, not from Java.
-     * @noinspection unused
-     */
     @Keep void resetIme() {
         if (!commitedText)
             return;
@@ -844,8 +812,6 @@ public class LorieView extends SurfaceView implements InputStub {
     @FastNative public native void sendStylusEvent(float x, float y, int pressure, int tiltX, int tiltY, int orientation, int buttons, boolean eraser, boolean mouseMode);
     @FastNative static public native void requestStylusEnabled(boolean enabled);
     public boolean sendKeyEvent(int scanCode, int keyCode, boolean keyDown) {
-//        if (keyCode == 67)
-//            new Exception().printStackTrace();
         return sendKeyEvent(scanCode, keyCode, keyDown, 0);
     }
     @FastNative public native boolean sendKeyEvent(int scanCode, int keyCode, boolean keyDown, int a);

@@ -57,6 +57,10 @@ import java.util.function.BiConsumer;
  */
 public class TouchInputHandler {
     private static final float EPSILON = 0.001f;
+
+    /** Global scale for all wheel/scroll injections (tune to taste or expose as a preference). */
+    private static final float WHEEL_SCALE = 100f;
+
     public static int STYLUS_INPUT_HELPER_MODE = 1; // 1 = Left Click, 2 Middle Click, 4 Right Click
 
     /** Used to set/store the selected input mode. */
@@ -103,34 +107,19 @@ public class TouchInputHandler {
     private static final int KEY_BACK = 158;
     private boolean keyIntercepting = false;
 
-    /**
-     * Used for tracking swipe gestures. Only the Y-direction is needed for responding to swipe-up
-     * or swipe-down.
-     */
+    /** Used for tracking swipe gestures. Only the Y-direction is needed for swipe-up/down. */
     private float mTotalMotionY;
 
-    /**
-     * Distance in pixels beyond which a motion gesture is considered to be a swipe. This is
-     * initialized using the Context passed into the constructor.
-     */
+    /** Distance in px beyond which a motion gesture is considered a swipe. */
     private final float mSwipeThreshold;
 
-    /**
-     * Set to true to prevent any further movement of the cursor, for example, when showing the
-     * keyboard to prevent the cursor wandering from the area where keystrokes should be sent.
-     */
+    /** Prevent cursor movement (e.g., while showing keyboard). */
     private boolean mSuppressCursorMovement;
 
-    /**
-     * Set to true when 3-finger swipe gesture is complete, so that further movement doesn't
-     * trigger more swipe actions.
-     */
+    /** True when a 3-finger swipe gesture is complete. */
     private boolean mSwipeCompleted;
 
-    /**
-     * Set to true when a 1 finger pan gesture originates with a long-press.  This means the user
-     * is performing a drag operation.
-     */
+    /** True when a 1 finger pan gesture originates with a long-press (drag). */
     private boolean mIsDragging;
 
     private static DisplayManager mDisplayManager;
@@ -168,17 +157,16 @@ public class TouchInputHandler {
         return ((currentBS & mask) != 0);
     }
 
-    // START MODIFICATION: Variables to track scrolling state for trackpads
+    // Trackpad scroll state
     private float mLastScrollX;
     private float mLastScrollY;
     private boolean mIsTrackpadScroll;
-    // END MODIFICATION
 
     private TouchInputHandler(MainActivity activity, RenderData renderData,
                               final InputEventSender injector, boolean isTouchpad) {
         if (injector == null)
             throw new NullPointerException();
-        mRenderData = renderData != null ? renderData :new RenderData();
+        mRenderData = renderData != null ? renderData : new RenderData();
         mInjector = injector;
         mActivity = activity;
         if (mDisplayManager == null) {
@@ -235,29 +223,45 @@ public class TouchInputHandler {
         MainActivity.getInstance().setExternalKeyboardConnected(externalKeyboardAvailable.get());
     }
 
-    // START MODIFICATION: Add helper for detecting classified scroll gestures
+    /** Detect vendor/OEM two-finger scroll classification without ACTION_SCROLL axes. */
     @SuppressLint({"WrongConstant", "InlinedApi"})
     private static boolean isClassifiedScrollEvent(MotionEvent e) {
         if ((e.getSource() & InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD) {
             return false;
         }
-        // On older Samsung DeX, two-finger scroll gestures are sent with this flag.
+        // Some OEMs (e.g., older DeX) tag two-finger scrolls via private flags.
         if ((e.getFlags() & 0x14000000) != 0) {
             return true;
         }
-        // On Android 10+ and standard touchpads, this classification is used.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && e.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE) {
-            return true;
-        }
-        return false;
+        // On Android 10+ standard touchpads: classification is TWO_FINGER_SWIPE.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                && e.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE;
     }
-    // END MODIFICATION
 
     boolean isDexEvent(MotionEvent event) {
-        return ((event.getSource() & InputDevice.SOURCE_MOUSE) ==
-    InputDevice.SOURCE_MOUSE)
+        return ((event.getSource() & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE)
                 && ((event.getSource() & InputDevice.SOURCE_TOUCHPAD) != InputDevice.SOURCE_TOUCHPAD)
                 && (event.getToolType(event.getActionIndex()) == MotionEvent.TOOL_TYPE_FINGER);
+    }
+
+    /**
+     * Forwarded from the view's onGenericMotionEvent to handle proper ACTION_SCROLL.
+     */
+    public boolean onGenericScroll(MotionEvent e) {
+        if ((e.getSource() & (InputDevice.SOURCE_MOUSE | InputDevice.SOURCE_TOUCHPAD)) == 0) {
+            return false;
+        }
+        if (e.getAction() != MotionEvent.ACTION_SCROLL) {
+            return false;
+        }
+        float v = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+        float h = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
+        if (v == 0f && h == 0f) {
+            return false;
+        }
+        // Keep signs consistent with other paths.
+        mInjector.sendMouseWheelEvent(-h * WHEEL_SCALE, -v * WHEEL_SCALE);
+        return true;
     }
 
     public boolean handleTouchEvent(View view0, View view, MotionEvent event) {
@@ -296,47 +300,42 @@ public class TouchInputHandler {
             if (isDexEvent(event) && mDexListener.onTouch(view, event))
                 return true;
 
-            // START MODIFICATION: Direct scroll handling for classified swipes
-            // The gesture is correctly identified as a two-finger swipe on the touchpad,
-            // but it's not generating ACTION_SCROLL events with AXIS_VSCROLL/HSCROLL.
-            // We need to handle the scroll directly here by calculating the delta and sending the scroll event.
+            // Direct handling for classified two-finger scrolls that only send MOVE.
             if (isClassifiedScrollEvent(event)) {
-                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                final int action = event.getActionMasked();
+                if (action == MotionEvent.ACTION_DOWN) {
                     mLastScrollX = event.getX();
                     mLastScrollY = event.getY();
                     mIsTrackpadScroll = true;
-                } else if (event.getActionMasked() == MotionEvent.ACTION_MOVE && mIsTrackpadScroll) {
+                    return true;
+                } else if (action == MotionEvent.ACTION_MOVE) {
+                    // Some touchpads never send DOWN for a two-finger scroll; start on first MOVE.
+                    if (!mIsTrackpadScroll) {
+                        mLastScrollX = event.getX();
+                        mLastScrollY = event.getY();
+                        mIsTrackpadScroll = true;
+                        return true; // primed; no delta yet
+                    }
                     float deltaX = event.getX() - mLastScrollX;
                     float deltaY = event.getY() - mLastScrollY;
-                    // Store last coordinates for next delta calculation
                     mLastScrollX = event.getX();
                     mLastScrollY = event.getY();
 
-                    // FIX: Send the scroll event directly to the injector,
-                    // similar to how MotionEvent.ACTION_SCROLL is handled,
-                    // instead of relying on mInputStrategy.onScroll or GestureDetector.
-                    // Invert deltaX/deltaY if needed to match expected scroll direction.
-                    // Scale factor (e.g., 100.0f) might need adjustment based on sensitivity.
-                    // Using the same scaling factor as ACTION_SCROLL for consistency.
-                    float scrollX = deltaX; // May need sign adjustment based on testing
-                    float scrollY = deltaY; // May need sign adjustment based on testing
+                    // Small deadzone to reduce jitter.
+                    if (Math.abs(deltaX) < 0.5f) deltaX = 0f;
+                    if (Math.abs(deltaY) < 0.5f) deltaY = 0f;
 
-                    // Send the calculated scroll deltas directly
-                    // Inverting Y might be necessary depending on expected direction (common for vertical scroll)
-                    // The scaling factor might need tuning. 100 is used as it matches the ACTION_SCROLL handler.
-                    // Adjust signs/scaling as needed based on testing.
-                    mInjector.sendMouseWheelEvent(-scrollX * 100, -scrollY * 100);
-
-                } else if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                     // Reset scroll state on finger lift or cancel
-                     mIsTrackpadScroll = false;
+                    mInjector.sendMouseWheelEvent(-deltaX * WHEEL_SCALE, -deltaY * WHEEL_SCALE);
+                    return true;
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    mIsTrackpadScroll = false;
+                    return true;
                 }
-                // Don't pass to other detectors if we handled it as a scroll.
-                return true;
+                // If we got here, we considered it a classified scroll but didn't handle current action.
+                return false;
             } else if (event.getActionMasked() == MotionEvent.ACTION_UP || event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
                 mIsTrackpadScroll = false;
             }
-            // END MODIFICATION
 
             if (mInputStrategy instanceof InputStrategyInterface.NullInputStrategy)
                 mInjector.sendTouchEvent(event, mRenderData);
@@ -361,19 +360,13 @@ public class TouchInputHandler {
                     mSwipeCompleted = false;
                     mIsDragging = false;
                     break;
-                case MotionEvent.ACTION_SCROLL: // This handles explicit scroll events (e.g., from physical mouse wheel)
+                case MotionEvent.ACTION_SCROLL: {
+                    // NOTE: This rarely arrives here; Android delivers ACTION_SCROLL via onGenericMotionEvent.
                     float scrollY = event.getAxisValue(MotionEvent.AXIS_VSCROLL);
                     float scrollX = event.getAxisValue(MotionEvent.AXIS_HSCROLL);
-                    if (scrollY == 0 && scrollX == 0) {
-                        // Try negated values if initial read is zero
-                        scrollY = -event.getAxisValue(MotionEvent.AXIS_VSCROLL);
-                        scrollX = -event.getAxisValue(MotionEvent.AXIS_HSCROLL);
-                    }
-                    // Scale factor applied here as well
-                    scrollY *= -100; // Invert Y for standard scroll direction
-                    scrollX *= -100; // Invert X if needed
-                    mInjector.sendMouseWheelEvent(scrollX, scrollY);
+                    mInjector.sendMouseWheelEvent(-scrollX * WHEEL_SCALE, -scrollY * WHEEL_SCALE);
                     return true;
+                }
                 case MotionEvent.ACTION_POINTER_DOWN:
                     mTotalMotionY = 0;
                     break;
@@ -384,7 +377,6 @@ public class TouchInputHandler {
         }
         return false;
     }
-
 
     private void resetTransformation() {
         if (mRenderData.imageWidth == 0 || mRenderData.imageHeight == 0) return;
@@ -485,7 +477,7 @@ public class TouchInputHandler {
         volumeDownAction = extractUserActionFromPreferences(p, "volumeDown");
         backButtonAction = extractUserActionFromPreferences(p, "backButton");
         mediaKeysAction = extractUserActionFromPreferences(p, "mediaKeys");
-        if(mTouchpadHandler != null)
+        if (mTouchpadHandler != null)
             mTouchpadHandler.reloadPreferences(p);
     }
 
@@ -592,8 +584,7 @@ public class TouchInputHandler {
         return true;
     }
 
-    /** Responds to touch events filtered by the gesture detectors.
-     * @noinspection NullableProblems*/
+    /** Responds to touch events filtered by the gesture detectors. */
     private class GestureListener extends GestureDetector.SimpleOnGestureListener
             implements TapGestureDetector.OnTapListener {
         private final Handler mGestureListenerHandler = new Handler(msg -> {
@@ -602,9 +593,7 @@ public class TouchInputHandler {
             return true;
         });
 
-        /**
-         * Called when the user drags one or more fingers across the touchscreen.
-         */
+        /** Called when the user drags one or more fingers across the touchscreen. */
         @Override
         public boolean onScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
             int pointerCount = e2.getPointerCount();
@@ -635,15 +624,13 @@ public class TouchInputHandler {
             return true;
         }
 
-        /** Called whenever a gesture starts. Always accepts the gesture so it isn't ignored. */
+        /** Always accept the gesture so it isn't ignored. */
         @Override
         public boolean onDown(MotionEvent e) {
             return true;
         }
 
-        /**
-         * Called when the user taps the screen with one or more fingers.
-         */
+        /** Called when the user taps the screen with one or more fingers. */
         @Override
         public void onTap(int pointerCount, float x, float y) {
             int button = mouseButtonFromPointerCount(pointerCount);
@@ -788,9 +775,7 @@ public class TouchInputHandler {
     private class HardwareMouseListener {
         private int savedBS = 0;
         private int currentBS = 0;
-        // START MODIFICATION
         private float lastX, lastY;
-        // END MODIFICATION
 
         boolean isMouseButtonChanged(int mask) {
             return (savedBS & mask) != (currentBS & mask);
@@ -805,19 +790,13 @@ public class TouchInputHandler {
                 {MotionEvent.BUTTON_SECONDARY, InputStub.BUTTON_RIGHT}
         };
 
-        /** @noinspection ReassignedVariable, SuspiciousNameCombination*/
         @SuppressLint("ClickableViewAccessibility")
         boolean onTouch(View v, MotionEvent e) {
+            // NOTE: ACTION_SCROLL rarely arrives here; wire onGenericMotionEvent to onGenericScroll().
             if (e.getAction() == MotionEvent.ACTION_SCROLL) {
                 float scrollY = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
                 float scrollX = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
-                if (scrollY == 0 && scrollX == 0) {
-                    scrollY = -e.getAxisValue(MotionEvent.AXIS_VSCROLL);
-                    scrollX = -e.getAxisValue(MotionEvent.AXIS_HSCROLL);
-                }
-                scrollY *= -100;
-                scrollX *= -100;
-                mInjector.sendMouseWheelEvent(scrollX, scrollY);
+                mInjector.sendMouseWheelEvent(-scrollX * WHEEL_SCALE, -scrollY * WHEEL_SCALE);
                 return true;
             }
             if (!v.hasPointerCapture()) {
@@ -832,17 +811,16 @@ public class TouchInputHandler {
                     x = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_X) : e.getX();
                     y = axis_relative_x ? e.getAxisValue(MotionEvent.AXIS_RELATIVE_Y) : e.getY();
                 } else {
-                    // START MODIFICATION: Add this else block to handle devices that don't
                     // Calculate relative motion from absolute coordinates
                     float deltaX = e.getX() - lastX;
                     float deltaY = e.getY() - lastY;
                     x = deltaX;
                     y = deltaY;
                 }
-                // Store the current position for the next event
+                // Store current position for next event
                 lastX = e.getX();
                 lastY = e.getY();
-                // END MODIFICATION
+
                 float temp;
                 switch (capturedPointerTransformation) {
                     case CapturedPointerTransformation.CLOCKWISE:
@@ -859,14 +837,11 @@ public class TouchInputHandler {
                 mInjector.sendCursorMove(x, y, true);
                 if (axis_relative_x && mTouchpadHandler != null)
                     mTouchpadHandler.mTapDetector.onTouchEvent(e);
-            }
-            // START MODIFICATION
-            else if (e.getAction() == MotionEvent.ACTION_DOWN) {
-                // Initialize last coordinates on the first touch event in captured mode
+            } else if (e.getAction() == MotionEvent.ACTION_DOWN) {
+                // Initialize last coordinates on the first event in captured mode
                 lastX = e.getX();
                 lastY = e.getY();
             }
-            // END MODIFICATION
             currentBS = e.getButtonState();
             for (int[] button: buttons)
                 if (isMouseButtonChanged(button[0]))
@@ -952,7 +927,7 @@ public class TouchInputHandler {
         }
     }
 
-    /** @noinspection NullableProblems*/
+    /** Dex-specific listener for captured DeX touchpads. */
     private class DexListener extends GestureDetector.SimpleOnGestureListener {
         private final GestureDetector mScroller;
         private int savedBS = 0;
@@ -1068,7 +1043,8 @@ public class TouchInputHandler {
 
         @Override
         public boolean onScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
-            mInjector.sendMouseWheelEvent(distanceX, distanceY);
+            // Keep consistent sign/scale with other wheel paths.
+            mInjector.sendMouseWheelEvent(-distanceX * WHEEL_SCALE, -distanceY * WHEEL_SCALE);
             return true;
         }
 

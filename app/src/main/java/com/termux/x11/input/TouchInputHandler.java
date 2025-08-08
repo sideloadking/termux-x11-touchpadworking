@@ -1,14 +1,3 @@
-Here you go — **complete fixed `TouchInputHandler.java`** with:
-
-* two-finger scroll working on OnePlus Pad 2 touchpad,
-* proper `ACTION_SCROLL` handling,
-* and no accidental double-clicks while scrolling (tap suppression in `DexListener`).
-
-```java
-// Path: app/src/main/java/com/termux/x11/input/TouchInputHandler.java
-// Copyright 2013 The Chromium Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
 package com.termux.x11.input;
 
 import static android.view.InputDevice.KEYBOARD_TYPE_ALPHABETIC;
@@ -1091,4 +1080,3 @@ public class TouchInputHandler {
         }
     }
 }
-```

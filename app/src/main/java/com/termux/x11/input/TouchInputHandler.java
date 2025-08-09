@@ -48,6 +48,8 @@ import java.util.function.BiConsumer;
  * are passed to the InputStrategyInterface implementation set by the DesktopView.
  */
 public class TouchInputHandler {
+    // Adjust this to tune two‑finger scroll speed (lower = slower, higher = faster)
+    private static final float WHEEL_SCALE = 28f;
     private static final float EPSILON = 0.001f;
     public static int STYLUS_INPUT_HELPER_MODE = 1; // 1 = Left Click, 2 Middle Click, 4 Right Click
 
@@ -307,7 +309,7 @@ public class TouchInputHandler {
                         mLastScrollX = event.getX();
                         mLastScrollY = event.getY();
                         // Keep same scaling/signs as ACTION_SCROLL branch
-                        mInjector.sendMouseWheelEvent(-dx * 100f, -dy * 100f);
+                        sendWheel(dx, dy);
                         return true;
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
@@ -371,6 +373,15 @@ public class TouchInputHandler {
             scrollY = -event.getAxisValue(MotionEvent.AXIS_VSCROLL);
             scrollX = -event.getAxisValue(MotionEvent.AXIS_HSCROLL);
         }
+        sendWheel(scrollX, scrollY);
+        return true;
+    }
+
+    // Unified wheel scaling/sign helper so we can tune speed in one place
+    private void sendWheel(float dx, float dy) {
+        // Negative to match expected direction across code paths
+        mInjector.sendMouseWheelEvent(-dx * WHEEL_SCALE, -dy * WHEEL_SCALE);
+    }
         // Keep your original inversion/scale
         scrollY *= -100f;
         scrollX *= -100f;
@@ -1057,7 +1068,7 @@ public class TouchInputHandler {
             // Only treat it as a wheel when the system classifies it as a two-finger swipe
             if (!isScrollingEvent(e2)) return false;
             // Match direction/scale with other scroll paths
-            mInjector.sendMouseWheelEvent(-distanceX * 100f, -distanceY * 100f);
+            sendWheel(distanceX, distanceY);
             return true;
         }
 

@@ -382,12 +382,6 @@ public class TouchInputHandler {
         // Negative to match expected direction across code paths
         mInjector.sendMouseWheelEvent(-dx * WHEEL_SCALE, -dy * WHEEL_SCALE);
     }
-        // Keep your original inversion/scale
-        scrollY *= -100f;
-        scrollX *= -100f;
-        mInjector.sendMouseWheelEvent(scrollX, scrollY);
-        return true;
-    }
 
     private void resetTransformation() {
         if (mRenderData.imageWidth == 0 || mRenderData.imageHeight == 0) return;

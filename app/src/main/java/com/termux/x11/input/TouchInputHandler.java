@@ -936,11 +936,14 @@ public class TouchInputHandler {
         private boolean onTap = false;
         private boolean mIsDragging = false;
         private boolean mIsScrolling = false;
-        // NEW: block tap generation while a two-finger scroll is in progress
+        // Block tap generation while a two-finger scroll is in progress
         private boolean suppressTap = false;
 
         DexListener(Context ctx) {
             mScroller = new GestureDetector(ctx, this, null, false);
+            mScroller.setIsLongpressEnabled(false);
+            // Needed for onSingleTapConfirmed/onDoubleTapEvent to fire
+            mScroller.setOnDoubleTapListener(this);
         }
 
         private final Handler handler = new Handler();
@@ -978,16 +981,20 @@ public class TouchInputHandler {
 
         @SuppressLint({"WrongConstant", "InlinedApi"})
         private boolean isScrollingEvent(MotionEvent e) {
-            return ( (e.getFlags() & 0x14000000) != 0 ) ||
+            return ((e.getFlags() & 0x14000000) != 0) ||
                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                     e.getClassification() == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE);
         }
 
         boolean onTouch(@SuppressWarnings("unused") View v, MotionEvent e) {
+            // Always feed the detector so taps/double-taps get recognized
+            mScroller.onTouchEvent(e);
+
             boolean isButtonHandled;
-            switch(e.getActionMasked()) {
+            switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_BUTTON_PRESS:
                 case MotionEvent.ACTION_BUTTON_RELEASE:
+                    // Generic motion for wheels, etc.
                     mScroller.onGenericMotionEvent(e);
                     handler.removeCallbacks(mouseDownRunnable);
                     onTap = e.getActionMasked() == MotionEvent.ACTION_BUTTON_PRESS;
@@ -1002,53 +1009,44 @@ public class TouchInputHandler {
                 }
                 case MotionEvent.ACTION_DOWN:
                     isButtonHandled = checkButtons(e);
+                    onTap = !isButtonHandled;
                     if (isScrollingEvent(e)) {
                         mIsScrolling = true;
                         suppressTap = true;
-                        mScroller.onTouchEvent(e);
-                    } else if (hasFlags(e, 0x4000000)) {
+                    } else if (hasFlags(e, 0x4000000)) { // drag flag
                         mIsDragging = true;
                         handler.postDelayed(mouseDownRunnable, 0);
-                    } else if (!isButtonHandled) {
-                        // Do NOT send mousedown immediately; let SingleTapConfirmed do the click.
-                        onTap = true;
-                    }
-                    return true;
-                case MotionEvent.ACTION_UP:
-                    isButtonHandled = checkButtons(e);
-                    if (isScrollingEvent(e)) {
-                        mScroller.onTouchEvent(e);
-                        mIsScrolling = false;
-                        suppressTap = false;
-                    } else if (hasFlags(e, 0x4000000)) {
-                        mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, false, false);
-                        mIsDragging = false;
-                    } else if (!isButtonHandled && onTap) {
-                        // We deferred sending any press; GestureDetector will issue SingleTapConfirmed.
-                        onTap = false;
                     }
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    // If the sequence starts with MOVE and is actually a scroll, enter scroll mode now.
-                    if (!mIsScrolling && isScrollingEvent(e)) {
-                        if (onTap) onTap = false; // cancel any pending tap
+                    if (isScrollingEvent(e)) {
                         mIsScrolling = true;
                         suppressTap = true;
                     }
-                    if (mIsScrolling) {
-                        mScroller.onTouchEvent(e);
-                    } else if ((mIsDragging && hasFlags(e, 0x4000000)) || onTap) {
+                    if (!mIsScrolling && (mIsDragging && hasFlags(e, 0x4000000) || onTap)) {
                         float scaledX = e.getX() * mRenderData.scale.x, scaledY = e.getY() * mRenderData.scale.y;
                         if (mRenderData.setCursorPosition(scaledX, scaledY))
                             mInjector.sendCursorMove(scaledX, scaledY, false);
                     }
                     return true;
-                case MotionEvent.ACTION_HOVER_EXIT: // when the user removes their hand from the trackpad, all states should be reset
+                case MotionEvent.ACTION_UP:
+                    checkButtons(e);
+                    // End of any scroll sequence
+                    mIsScrolling = false;
+                    suppressTap = false;
+                    if (mIsDragging) {
+                        mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, false, false);
+                        mIsDragging = false;
+                    }
+                    onTap = false;
+                    return true;
+                case MotionEvent.ACTION_HOVER_EXIT:
                 case MotionEvent.ACTION_CANCEL:
                     onTap = false;
                     mIsScrolling = false;
                     mIsDragging = false;
                     suppressTap = false;
+                    handler.removeCallbacks(mouseDownRunnable);
                     return true;
             }
             return false;
@@ -1056,15 +1054,16 @@ public class TouchInputHandler {
 
         @Override
         public boolean onScroll(MotionEvent e1, MotionEvent e2, float distanceX, float distanceY) {
-            // Keep direction consistent with other paths; adjust if needed.
-            mInjector.sendMouseWheelEvent(distanceX, distanceY);
+            // Only treat it as a wheel when the system classifies it as a two-finger swipe
+            if (!isScrollingEvent(e2)) return false;
+            // Match direction/scale with other scroll paths
+            mInjector.sendMouseWheelEvent(-distanceX * 100f, -distanceY * 100f);
             return true;
         }
 
         @Override
         public boolean onDoubleTapEvent(MotionEvent e) {
-            // Don’t generate double clicks while a two-finger scroll is in progress.
-            if (mIsScrolling || isScrollingEvent(e)) return true;
+            if (mIsScrolling || isScrollingEvent(e)) return true; // ignore while scrolling
             onSingleTapConfirmed(e);
             onSingleTapConfirmed(e);
             return true;
@@ -1072,8 +1071,7 @@ public class TouchInputHandler {
 
         @Override
         public boolean onSingleTapConfirmed(MotionEvent e) {
-            // Swallow taps if we just scrolled with two fingers.
-            if (mIsScrolling || suppressTap) return true;
+            if (mIsScrolling || suppressTap) return true; // swallow tap after scroll
             mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, true, false);
             mInjector.sendMouseEvent(mRenderData.getCursorPosition(), InputStub.BUTTON_LEFT, false, false);
             return true;

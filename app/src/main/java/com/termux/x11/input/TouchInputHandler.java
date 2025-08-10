@@ -49,7 +49,7 @@ import java.util.function.BiConsumer;
  */
 public class TouchInputHandler {
     // Adjust this to tune two‑finger scroll speed (lower = slower, higher = faster)
-    private static final float WHEEL_SCALE = 28f;
+    private static final float WHEEL_SCALE = 12f;
     private static final float EPSILON = 0.001f;
     public static int STYLUS_INPUT_HELPER_MODE = 1; // 1 = Left Click, 2 Middle Click, 4 Right Click
 
@@ -373,15 +373,14 @@ public class TouchInputHandler {
             scrollY = -event.getAxisValue(MotionEvent.AXIS_VSCROLL);
             scrollX = -event.getAxisValue(MotionEvent.AXIS_HSCROLL);
         }
-        sendWheel(scrollX, scrollY);
+        // For ACTION_SCROLL, historically our code inverted sign; keep that behavior here only
+        sendWheel(-scrollX, -scrollY);
         return true;
     }
 
     // Unified wheel scaling/sign helper so we can tune speed in one place
     private void sendWheel(float dx, float dy) {
-        // Negative to match expected direction across code paths
-        mInjector.sendMouseWheelEvent(-dx * WHEEL_SCALE, -dy * WHEEL_SCALE);
-    }
+        mInjector.sendMouseWheelEvent(dx * WHEEL_SCALE,
 
     private void resetTransformation() {
         if (mRenderData.imageWidth == 0 || mRenderData.imageHeight == 0) return;
@@ -847,6 +846,7 @@ public class TouchInputHandler {
             }
             else if (e.getAction() == MotionEvent.ACTION_DOWN) {
                 // Initialize last coordinates on the first touch event in captured mode
+
                 lastX = e.getX();
                 lastY = e.getY();
             }

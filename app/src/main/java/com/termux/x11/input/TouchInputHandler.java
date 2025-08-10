@@ -380,7 +380,8 @@ public class TouchInputHandler {
 
     // Unified wheel scaling/sign helper so we can tune speed in one place
     private void sendWheel(float dx, float dy) {
-        mInjector.sendMouseWheelEvent(dx * WHEEL_SCALE,
+        mInjector.sendMouseWheelEvent(dx * WHEEL_SCALE, dy * WHEEL_SCALE);
+    }
 
     private void resetTransformation() {
         if (mRenderData.imageWidth == 0 || mRenderData.imageHeight == 0) return;
